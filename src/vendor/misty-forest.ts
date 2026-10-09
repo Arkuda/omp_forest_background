@@ -9,7 +9,7 @@
  * then drawn as a halftone: dot size from brightness with an ordered dither,
  * colour from the palette entry nearest its hue.
  */
-type Frame = (t: number, env?: { color?: Uint8Array }) => string;
+import type { Frame, Meta } from "./types.ts";
 
 export const meta = {
   name: "misty forest",
@@ -32,7 +32,7 @@ export const meta = {
     // the clear sky above the fog, deepening overhead
     "#a9c3cc", "#8eadb8", "#6f93a2", "#53798a", "#3d6172", "#2b4a5a",
   ],
-};
+} satisfies Meta;
 
 const W = 200, H = 100;
 const SUN: [number, number] = [146, 45.5];

@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import type { ForestState } from "./background.ts";
 import { generateItermAssets } from "./iterm-assets.ts";
 import type { GeneratedItermAssets } from "./iterm-assets.ts";
+import { FRAME_COUNT, isSceneId, SAMPLE_FPS } from "./scenes.ts";
+import type { SceneId } from "./scenes.ts";
 
 export interface ItermSnapshot {
   imagePath: string;
@@ -103,6 +105,7 @@ export class ItermBackground {
   private directory: string | undefined;
   private assets: GeneratedItermAssets | undefined;
   private brightness: number | undefined;
+  private scene: SceneId | undefined;
   private frame = 0;
   private direction = 1;
   private variant = 0;
@@ -148,6 +151,7 @@ export class ItermBackground {
       }
       if (this.fault) throw this.fault;
       if (!Number.isFinite(requested.brightness) || requested.brightness < 0 || requested.brightness > 0.3) throw new Error("Forest brightness must be a finite number between 0 and 0.3.");
+      if (!isSceneId(requested.scene)) throw new Error(`Unknown forest scene: ${requested.scene}.`);
       await this.acquire();
       try {
         const current = await this.bridge.read(this.id);
@@ -157,10 +161,11 @@ export class ItermBackground {
           this.original = current;
         }
         this.directory ??= await mkdtemp(join(this.options.temporaryDirectory ?? tmpdir(), "omp-forest-iterm-assets-"));
-        if (!this.assets || this.brightness !== requested.brightness) {
-          const assets = await (this.options.generateAssets ?? generateItermAssets)(join(this.directory, String(this.variant++)), { brightness: requested.brightness, backgroundColor: this.original.backgroundColor });
-          if (assets.framePaths.length !== 64 || assets.frameIntervalMs !== 500 || !assets.framePaths.every(isAbsolute)) throw new Error("The iTerm2 forest assets must contain 64 absolute image paths at 2fps.");
+        if (!this.assets || this.scene !== requested.scene || this.brightness !== requested.brightness) {
+          const assets = await (this.options.generateAssets ?? generateItermAssets)(join(this.directory, String(this.variant++)), { scene: requested.scene, brightness: requested.brightness, backgroundColor: this.original.backgroundColor });
+          if (assets.framePaths.length !== FRAME_COUNT || assets.frameIntervalMs !== 1000 / SAMPLE_FPS || !assets.framePaths.every(isAbsolute)) throw new Error(`The iTerm2 forest assets must contain ${FRAME_COUNT} absolute image paths at ${SAMPLE_FPS}fps.`);
           this.assets = assets;
+          this.scene = requested.scene;
           this.brightness = requested.brightness;
         }
         this.frame = 0;
@@ -204,11 +209,12 @@ export class ItermBackground {
 
   private arm(epoch: number, delay: number): void {
     this.timer = this.schedule(() => {
+      if (this.closing || epoch !== this.epoch) return Promise.resolve();
       this.timer = undefined;
       return this.enqueue(async () => {
         if (this.closing || epoch !== this.epoch || this.fault || !this.assets || this.applied === undefined) return;
         const deadline = this.now() + this.assets.frameIntervalMs;
-        if (this.frame === 63) this.direction = -1;
+        if (this.frame === FRAME_COUNT - 1) this.direction = -1;
         else if (this.frame === 0) this.direction = 1;
         const next = this.frame + this.direction;
         await this.change(this.applied, this.assets.framePaths[next]);
@@ -279,6 +285,7 @@ export class ItermBackground {
     this.attempted = undefined;
     this.assets = undefined;
     this.brightness = undefined;
+    this.scene = undefined;
     await this.release();
     if (this.directory && current) {
       const imageRelative = relative(this.directory, current.imagePath);

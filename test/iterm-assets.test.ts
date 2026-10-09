@@ -6,6 +6,7 @@ import { inflateSync } from "node:zlib";
 import { generateItermAssets } from "../src/iterm-assets.ts";
 import type { GeneratedItermAssets } from "../src/iterm-assets.ts";
 import { decodeRgbaPng } from "../src/png.ts";
+import { DEFAULT_SCENE, FRAME_COUNT, TILES_PER_ROW, scenes } from "../src/scenes.ts";
 import mistyForest, { meta } from "../src/vendor/misty-forest.ts";
 
 const background = [253, 17, 31] as const;
@@ -67,7 +68,7 @@ afterAll(async () => {
 describe("native original-scene images", () => {
   let generated: GeneratedItermAssets;
   beforeAll(async () => {
-    generated = await generateItermAssets(await directory(), { brightness, backgroundColor: background });
+    generated = await generateItermAssets(await directory(), { scene: DEFAULT_SCENE, brightness, backgroundColor: background });
   }, 60_000);
 
   test("exports 64 absolute, opaque 1200x600 images at the original sample cadence", async () => {
@@ -149,7 +150,7 @@ describe("native original-scene images", () => {
 
   test("zero brightness produces exactly the unmodified profile background", async () => {
     const base = [9, 21, 33] as const;
-    const result = await generateItermAssets(await directory(), { brightness: 0, backgroundColor: base });
+    const result = await generateItermAssets(await directory(), { scene: DEFAULT_SCENE, brightness: 0, backgroundColor: base });
     for (const frame of [0, 63]) {
       const decoded = image(await readFile(result.framePaths[frame]));
       let unchanged = true;
@@ -165,8 +166,43 @@ describe("native original-scene images", () => {
   }, 60_000);
 });
 
+test("expands a different scene's larger palette across tile-row boundaries and the final sample", async () => {
+  const scene = "tokyo-rain";
+  const selected = scenes[scene];
+  const generated = await generateItermAssets(await directory(), { scene, brightness, backgroundColor: background });
+  const atlas = image(await readFile(new URL(`../assets/scenes/${scene}/atlas.png`, import.meta.url)));
+  expect([atlas.width, atlas.height]).toEqual([
+    selected.cols * TILES_PER_ROW, selected.rows * (FRAME_COUNT / TILES_PER_ROW),
+  ]);
+  const paletteIndices = new Set<number>();
+  for (const frame of [0, 7, 8, 63]) {
+    const decoded = image(await readFile(generated.framePaths[frame]));
+    expect([decoded.width, decoded.height]).toEqual([selected.cols * 6, selected.rows * selected.cell * 6]);
+    const tileX = (frame % TILES_PER_ROW) * selected.cols;
+    const tileY = Math.floor(frame / TILES_PER_ROW) * selected.rows;
+    for (let y = 0; y < selected.rows; y++) {
+      for (let x = 0; x < selected.cols; x++) {
+        const packed = pixel(atlas, tileX + x, tileY + y)[0];
+        const paletteIndex = packed >> 2;
+        const step = packed & 3;
+        paletteIndices.add(paletteIndex);
+        const color = rgb(step === 0 ? selected.ground : selected.palette[paletteIndex]);
+        const actual = pixel(decoded, x * 6 + 2, y * 6 + 2);
+        const expected = additive(color);
+        if (!actual.every((channel, index) => channel === expected[index])) {
+          throw new Error(`${scene} frame ${frame}, cell ${x},${y} has the wrong native color.`);
+        }
+      }
+    }
+  }
+  expect([...paletteIndices].some((index) => index >= 32)).toBe(true);
+  const first = await readFile(generated.framePaths[0]);
+  const last = await readFile(generated.framePaths[63]);
+  expect(first.equals(last)).toBe(false);
+}, 60_000);
+
 test("rejects a damaged atlas, an unexpected size, and trailing data", async () => {
-  const original = await readFile(new URL("../assets/forest-atlas.png", import.meta.url));
+  const original = await readFile(new URL("../assets/scenes/misty-forest/atlas.png", import.meta.url));
   const damaged = Buffer.from(original);
   damaged[damaged.length - 5] ^= 1;
   await expect(decodeRgbaPng(damaged, 1600, 800)).rejects.toThrow("damaged");

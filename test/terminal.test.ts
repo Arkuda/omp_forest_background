@@ -2,14 +2,16 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parse, type ParseError } from "jsonc-parser";
+import { parse } from "jsonc-parser";
+import type { ParseError } from "jsonc-parser";
 import { TerminalBackground } from "../src/terminal.ts";
+import type { ForestState } from "../src/background.ts";
 
 const PROFILE = "{61c54bbd-c2c6-5271-96e7-009a87ff44bf}";
 const OTHER = "{0caa0dad-35be-5f56-a8ff-afceeeaa6101}";
 const SHADER = "experimental.pixelShaderPath";
 const IMAGE = "experimental.pixelShaderImagePath";
-const state = { enabled: true, animated: true, brightness: 0.1 };
+const state: ForestState = { enabled: true, animated: true, brightness: 0.1, scene: "misty-forest" };
 const directories: string[] = [];
 const controllers: TerminalBackground[] = [];
 
@@ -124,6 +126,23 @@ describe("profile-scoped Windows Terminal JSONC configuration", () => {
     expect(Object.hasOwn(restored.target, IMAGE)).toBe(true);
     expect(restored.target[IMAGE]).toBeNull();
     expect(restored.text).toContain("// intentional null");
+  });
+
+  test("changes both native assets on scene switches without recapturing the original appearance", async () => {
+    const { settingsPath, controller } = await fixture(`"${IMAGE}": "C:\\\\original.png",`);
+    await controller.apply(state);
+    const forest = await settings(settingsPath);
+    await controller.apply({ ...state, scene: "earthrise" });
+    const earthrise = await settings(settingsPath);
+    expect(earthrise.target[SHADER]).not.toBe(forest.target[SHADER]);
+    expect(earthrise.target[IMAGE]).not.toBe(forest.target[IMAGE]);
+    expect((await readFile(earthrise.target[IMAGE] as string)).equals(await readFile(forest.target[IMAGE] as string))).toBe(false);
+    await controller.apply({ ...state, scene: "misty-forest" });
+    expect((await settings(settingsPath)).target[IMAGE]).toBe(forest.target[IMAGE]);
+    await controller.apply({ ...state, enabled: false });
+    const restored = await settings(settingsPath);
+    expect(restored.target[IMAGE]).toBe("C:\\original.png");
+    expect(Object.hasOwn(restored.target, SHADER)).toBe(false);
   });
 
   test("keeps a user's replacement shader and deletion of the image while restoring", async () => {

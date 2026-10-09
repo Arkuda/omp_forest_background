@@ -1,7 +1,7 @@
 {
   "name": "omp-forest-background",
-  "version": "3.0.0",
-  "description": "An animated misty-forest background for omp in Windows Terminal and iTerm2",
+  "version": "3.1.0",
+  "description": "All 15 ascii.rest scenes as animated omp backgrounds in Windows Terminal and iTerm2",
   "type": "module",
   "license": "MIT",
   "files": ["index.ts", "src", "assets", "scripts/generate-assets.ts", "LICENSE", "README.md"],

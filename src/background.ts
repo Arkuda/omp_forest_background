@@ -1,10 +1,12 @@
 import { ItermBackground } from "./iterm.ts";
 import { TerminalBackground } from "./terminal.ts";
+import type { SceneId } from "./scenes.ts";
 
 export interface ForestState {
   enabled: boolean;
   animated: boolean;
   brightness: number;
+  scene: SceneId;
 }
 
 export interface Background {

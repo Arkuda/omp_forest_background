@@ -3,11 +3,13 @@ import { randomUUID } from "node:crypto";
 import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ForestState } from "../src/background.ts";
 import { ItermBackground } from "../src/iterm.ts";
 import type { ItermBridge, ItermSnapshot } from "../src/iterm.ts";
-import type { GeneratedItermAssets } from "../src/iterm-assets.ts";
+import type { generateItermAssets } from "../src/iterm-assets.ts";
+import { DEFAULT_SCENE, FRAME_COUNT, SAMPLE_FPS } from "../src/scenes.ts";
 
-const enabled = { enabled: true, animated: true, brightness: 0.16 };
+const enabled: ForestState = { enabled: true, animated: true, brightness: 0.16, scene: DEFAULT_SCENE };
 const off = { ...enabled, enabled: false };
 const directories: string[] = [];
 const controllers: ItermBackground[] = [];
@@ -93,8 +95,13 @@ async function fixture(originalImage = "") {
   sessions.panes.set(sessions.activePane, { imagePath: "/focused-pane.png", profileName: "Focused pane", backgroundColor: [90, 80, 70] });
   const clock = new Clock();
   const failures: Error[] = [];
-  const generations: Array<{ brightness: number; backgroundColor: readonly [number, number, number] }> = [];
   let frames: string[] = [];
+  const generateAssets: typeof generateItermAssets = async (output) => {
+    await mkdir(output, { recursive: true });
+    frames = Array.from({ length: FRAME_COUNT }, (_, frame) => join(output, `${frame}.png`));
+    await Promise.all(frames.map((path) => writeFile(path, "image fixture")));
+    return { framePaths: frames, frameIntervalMs: 1000 / SAMPLE_FPS };
+  };
   const options = {
     sessionId: `w99t7p3:${id.toLowerCase()}`,
     bridge: sessions,
@@ -103,17 +110,11 @@ async function fixture(originalImage = "") {
     cancel: clock.cancel,
     now: () => clock.time,
     onError: (error: Error) => { failures.push(error); },
-    generateAssets: async (output: string, params: { brightness: number; backgroundColor: readonly [number, number, number] }): Promise<GeneratedItermAssets> => {
-      generations.push(params);
-      await mkdir(output, { recursive: true });
-      frames = Array.from({ length: 64 }, (_, frame) => join(output, `${frame}.png`));
-      await Promise.all(frames.map((path) => writeFile(path, "image fixture")));
-      return { framePaths: frames, frameIntervalMs: 500 };
-    },
+    generateAssets,
   };
   const controller = await ItermBackground.create(options);
   controllers.push(controller);
-  return { controller, options, directory, id, sessions, clock, failures, generations, image: () => sessions.panes.get(id)!.imagePath, frames: () => frames };
+  return { controller, options, directory, id, sessions, clock, failures, image: () => sessions.panes.get(id)!.imagePath, frames: () => frames };
 }
 
 afterEach(async () => {
@@ -124,11 +125,24 @@ afterEach(async () => {
 });
 
 describe("native iTerm2 session background lifecycle", () => {
+  test("an unknown scene rejects before reading or changing the native pane", async () => {
+    const f = await fixture("/original.png");
+    const calls = f.sessions.calls;
+    await expect(f.controller.apply({ ...enabled, scene: "not-a-scene" as ForestState["scene"] })).rejects.toThrow("Unknown forest scene");
+    expect(f.sessions.calls).toBe(calls);
+    expect(f.sessions.writes).toHaveLength(0);
+    expect(f.image()).toBe("/original.png");
+    expect(f.clock.next).toBeUndefined();
+    await f.controller.apply({ ...enabled, animated: false });
+    expect(f.image()).toBe(f.frames()[0]);
+    await f.controller.apply(off);
+    expect(f.image()).toBe("/original.png");
+  });
+
   test("targets the inherited exact UUID, never the focused pane, and ping-pongs without duplicated endpoints", async () => {
     const f = await fixture();
     await f.controller.apply(enabled);
     expect(f.controller.profileName).toBe("Target pane");
-    expect(f.generations).toEqual([{ brightness: 0.16, backgroundColor: [12, 24, 36] }]);
     for (let step = 0; step < 126; step++) {
       expect(f.clock.next?.delay).toBe(500);
       await f.clock.tick();
@@ -140,6 +154,102 @@ describe("native iTerm2 session background lifecycle", () => {
     await f.controller.apply({ ...enabled, animated: false });
     expect(f.image()).toBe(f.frames()[0]);
     expect(f.clock.next).toBeUndefined();
+  });
+
+  test("switching scenes at equal brightness replaces only the owned pane and keeps the initial baseline", async () => {
+    const f = await fixture("/original.png");
+    await f.controller.apply(enabled);
+    const firstFrames = [...f.frames()];
+    const staleFirstTimer = f.clock.next!;
+    await f.clock.tick();
+    await f.controller.apply({ ...enabled, scene: "tokyo-rain" });
+    const secondFrames = [...f.frames()];
+    expect(secondFrames[0]).not.toBe(firstFrames[0]);
+    expect(f.image()).toBe(secondFrames[0]);
+    await access(firstFrames[20]);
+    const secondTimer = f.clock.next!;
+    const writes = f.sessions.writes.length;
+    await staleFirstTimer.callback();
+    expect(f.sessions.writes).toHaveLength(writes);
+    expect(f.clock.next).toBe(secondTimer);
+    await f.clock.tick();
+    expect(f.image()).toBe(secondFrames[1]);
+    await f.controller.apply({ ...enabled, scene: "tokyo-rain", animated: false });
+    expect(f.image()).toBe(secondFrames[0]);
+    await f.controller.apply(off);
+    expect(f.image()).toBe("/original.png");
+    expect(f.sessions.writes.every(({ id }) => id === f.id)).toBe(true);
+    expect(f.sessions.panes.get(f.sessions.activePane)!.imagePath).toBe("/focused-pane.png");
+    await expect(access(firstFrames[20])).rejects.toThrow();
+    await expect(access(secondFrames[0])).rejects.toThrow();
+    const finalWrites = f.sessions.writes.length;
+    await secondTimer.callback();
+    expect(f.sessions.writes).toHaveLength(finalWrites);
+    expect(f.clock.next).toBeUndefined();
+  });
+
+  test("off drains a pending scene switch without restarting either scene's animation", async () => {
+    const f = await fixture("/original.png");
+    await f.controller.apply(enabled);
+    const staleTimer = f.clock.next!;
+    const firstFrames = [...f.frames()];
+    const pause = { entered: deferred(), finish: deferred() };
+    f.sessions.pause = pause;
+    const switching = f.controller.apply({ ...enabled, scene: "deep-reef" });
+    await pause.entered.promise;
+    const secondFrames = [...f.frames()];
+    const disabled = f.controller.apply(off);
+    expect(f.clock.next).toBeUndefined();
+    pause.finish.resolve();
+    await Promise.all([switching, disabled]);
+    expect(f.sessions.writes.slice(-2).map(({ next }) => next)).toEqual([secondFrames[0], "/original.png"]);
+    expect(f.image()).toBe("/original.png");
+    expect(f.sessions.maxInFlight).toBe(1);
+    const calls = f.sessions.calls;
+    await staleTimer.callback();
+    expect(f.sessions.calls).toBe(calls);
+    expect(f.clock.next).toBeUndefined();
+    await expect(access(firstFrames[0])).rejects.toThrow();
+    await expect(access(secondFrames[0])).rejects.toThrow();
+  });
+
+  test("a timed-out scene switch retains both variants until the observed owned image is restored", async () => {
+    const f = await fixture("/original.png");
+    await f.controller.apply(enabled);
+    const firstFrames = [...f.frames()];
+    const error = new Error("Scene setter timed out after applying");
+    f.sessions.failure = { error, afterWrite: true };
+    await expect(f.controller.apply({ ...enabled, scene: "aurora-fjord" })).rejects.toThrow("Scene setter timed out");
+    const secondFrames = [...f.frames()];
+    expect(secondFrames[0]).not.toBe(firstFrames[0]);
+    expect(f.image()).toBe(secondFrames[0]);
+    expect(f.failures).toEqual([error]);
+    expect(f.clock.next).toBeUndefined();
+    await access(firstFrames[0]);
+    await access(secondFrames[0]);
+    await f.controller.apply(off);
+    expect(f.image()).toBe("/original.png");
+    await expect(access(firstFrames[0])).rejects.toThrow();
+    await expect(access(secondFrames[0])).rejects.toThrow();
+  });
+
+  test("a user-selected frame from an earlier scene keeps all variants alive through off and shutdown", async () => {
+    const f = await fixture("/original.png");
+    await f.controller.apply(enabled);
+    const selected = f.frames()[20];
+    await f.controller.apply({ ...enabled, scene: "lantern-lake" });
+    const currentSceneFrame = f.frames()[0];
+    f.sessions.panes.get(f.id)!.imagePath = selected;
+    await f.clock.tick();
+    expect(f.failures).toHaveLength(1);
+    await f.controller.apply(off);
+    expect(f.image()).toBe(selected);
+    await access(selected);
+    await access(currentSceneFrame);
+    await f.controller.restore();
+    expect(f.image()).toBe(selected);
+    await access(selected);
+    await access(currentSceneFrame);
   });
 
   test("off drains a tick already in flight and cannot leave its image behind", async () => {
@@ -183,16 +293,14 @@ describe("native iTerm2 session background lifecycle", () => {
     expect(f.image()).toBe("/late-user-change.png");
   });
 
-  test("restores empty paths exactly and re-enable captures a fresh image and color baseline", async () => {
+  test("restores empty paths exactly and re-enable captures a fresh image baseline", async () => {
     const f = await fixture("");
     await f.controller.apply({ ...enabled, animated: false });
     await f.controller.apply(off);
     expect(f.image()).toBe("");
     const pane = f.sessions.panes.get(f.id)!;
     pane.imagePath = "/new baseline.png";
-    pane.backgroundColor = [22, 33, 44];
     await f.controller.apply({ ...enabled, brightness: 0.2, animated: false });
-    expect(f.generations[1]).toEqual({ brightness: 0.2, backgroundColor: [22, 33, 44] });
     await f.controller.restore();
     expect(f.image()).toBe("/new baseline.png");
     const calls = f.sessions.calls;

@@ -3,8 +3,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { access, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, win32 } from "node:path";
 import { promisify } from "node:util";
-import { createScanner, findNodeAtLocation, getNodeValue, parseTree, SyntaxKind, type Node, type ParseError } from "jsonc-parser";
-import { generateAssets, type GeneratedAssets } from "./assets.ts";
+import { createScanner, findNodeAtLocation, getNodeValue, parseTree, SyntaxKind } from "jsonc-parser";
+import type { Node, ParseError } from "jsonc-parser";
+import { generateAssets } from "./assets.ts";
+import type { GeneratedAssets } from "./assets.ts";
+import type { ForestState } from "./background.ts";
+import { isSceneId } from "./scenes.ts";
+import type { SceneId } from "./scenes.ts";
 
 const SHADER = "experimental.pixelShaderPath";
 const IMAGE = "experimental.pixelShaderImagePath";
@@ -194,7 +199,7 @@ export class TerminalBackground {
   private readonly token = randomUUID();
   private original: Snapshot | undefined;
   private applied: Snapshot | undefined;
-  private assets: GeneratedAssets | undefined;
+  private readonly assets = new Map<SceneId, GeneratedAssets>();
   private locked = false;
   private pending: Promise<void> = Promise.resolve();
 
@@ -219,10 +224,12 @@ export class TerminalBackground {
     return controller;
   }
 
-  apply(state: { enabled: boolean; animated: boolean; brightness: number }): Promise<void> {
+  apply(state: ForestState): Promise<void> {
+    const requested = { ...state };
     return this.enqueue(async () => {
-      if (!state.enabled) { await this.restoreNow(); return; }
-      if (!Number.isFinite(state.brightness) || state.brightness < 0 || state.brightness > 0.3) {
+      if (!requested.enabled) { await this.restoreNow(); return; }
+      if (!isSceneId(requested.scene)) throw new Error(`Unknown scene: ${requested.scene}`);
+      if (!Number.isFinite(requested.brightness) || requested.brightness < 0 || requested.brightness > 0.3) {
         throw new Error("Forest brightness must be a finite number between 0 and 0.3.");
       }
       await this.acquire();
@@ -238,16 +245,19 @@ export class TerminalBackground {
         this.original = current;
       }
       const directory = join(dirname(this.lockPath), this.token);
-      this.assets ??= await generateAssets(directory);
-      const template = await readFile(this.assets.shaderTemplatePath, "utf8");
+      let assets = this.assets.get(requested.scene);
+      if (!assets) {
+        assets = await generateAssets(directory, requested.scene);
+        this.assets.set(requested.scene, assets);
+      }
+      const template = await readFile(assets.shaderTemplatePath, "utf8");
       if (!template.includes("{{BRIGHTNESS}}") || !template.includes("{{ANIMATED}}")) throw new Error("The forest shader template is missing its brightness/animation substitutions.");
-      const brightness = Number.isInteger(state.brightness) ? `${state.brightness}.0` : String(state.brightness);
-      const shader = template.replaceAll("{{BRIGHTNESS}}", brightness).replaceAll("{{ANIMATED}}", state.animated ? "1" : "0");
-      // WT reloads a changed path, not an edited shader file. Both parameters are
-      // included in each variant's name, within this controller's unique directory.
-      const shaderPath = resolve(directory, `forest-b${brightness}-a${state.animated ? 1 : 0}.hlsl`);
+      const brightness = Number.isInteger(requested.brightness) ? `${requested.brightness}.0` : String(requested.brightness);
+      const shader = template.replaceAll("{{BRIGHTNESS}}", brightness).replaceAll("{{ANIMATED}}", requested.animated ? "1" : "0");
+      // WT recompiles a changed shader path; scene and controls identify each variant.
+      const shaderPath = resolve(directory, `${requested.scene}-b${brightness}-a${requested.animated ? 1 : 0}.hlsl`);
       await writeFile(shaderPath, shader, "utf8");
-      const next: Snapshot = { [SHADER]: { present: true, value: shaderPath }, [IMAGE]: { present: true, value: resolve(this.assets.atlasPath) } };
+      const next: Snapshot = { [SHADER]: { present: true, value: shaderPath }, [IMAGE]: { present: true, value: resolve(assets.atlasPath) } };
       let changed = text;
       for (const field of FIELDS) changed = setProperty(changed, this.profileId, field, next[field]);
       await this.commit(text, changed);
