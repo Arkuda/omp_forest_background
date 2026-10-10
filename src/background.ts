@@ -18,6 +18,7 @@ export interface Background {
 export interface BackgroundOptions {
   profileId?: string;
   settingsPath?: string;
+  profileBindingPath?: string;
   onError?: (error: Error) => void;
 }
 

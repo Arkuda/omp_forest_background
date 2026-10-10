@@ -10,6 +10,8 @@ import type { GeneratedAssets } from "./assets.ts";
 import type { ForestState } from "./background.ts";
 import { isSceneId } from "./scenes.ts";
 import type { SceneId } from "./scenes.ts";
+import { loadProfileBinding, saveProfileBinding } from "./profile.ts";
+import type { ProfileBinding } from "./profile.ts";
 
 const SHADER = "experimental.pixelShaderPath";
 const IMAGE = "experimental.pixelShaderImagePath";
@@ -20,6 +22,12 @@ type Snapshot = Record<Field, Property>;
 type Ancestor = { Name?: string; ExecutablePath?: string; CommandLine?: string };
 type Document = { profile: Node; defaults: Node | undefined };
 
+class TerminalDetectionError extends Error {}
+
+export interface TerminalProfile extends ProfileBinding {
+  name: string;
+}
+
 function property(node: Node | undefined, name: Field): Property {
   const value = node && findNodeAtLocation(node, [name]);
   return value ? { present: true, value: getNodeValue(value) } : { present: false, value: undefined };
@@ -29,12 +37,19 @@ function equal(left: Property, right: Property): boolean {
   return left.present === right.present && JSON.stringify(left.value) === JSON.stringify(right.value);
 }
 
-function document(text: string, profileId: string): Document {
+function settingsTree(text: string): Node {
   const errors: ParseError[] = [];
   const tree = parseTree(text, errors, { allowTrailingComma: true, disallowComments: false });
   if (!tree || errors.length) throw new Error("Windows Terminal settings are not valid JSONC; fix them before enabling the forest.");
-  const list = findNodeAtLocation(tree, ["profiles", "list"]);
-  if (list?.type !== "array") throw new Error("Windows Terminal settings must contain profiles.list; no global defaults will be changed.");
+  if (findNodeAtLocation(tree, ["profiles", "list"])?.type !== "array") {
+    throw new Error("Windows Terminal settings must contain profiles.list; no global defaults will be changed.");
+  }
+  return tree;
+}
+
+function document(text: string, profileId: string): Document {
+  const tree = settingsTree(text);
+  const list = findNodeAtLocation(tree, ["profiles", "list"])!;
   const matches = (list.children ?? []).filter((profile) => {
     const id = findNodeAtLocation(profile, ["guid"]);
     return id?.type === "string" && getNodeValue(id).replace(/^\{|\}$/g, "").toLowerCase() === profileId.replace(/^\{|\}$/g, "").toLowerCase();
@@ -155,7 +170,7 @@ async function settingsPath(chain: Ancestor[]): Promise<string> {
   const candidates: string[] = [];
   for (const candidate of [stable, preview, unpackaged]) if (await exists(candidate)) candidates.push(candidate);
   if (candidates.length === 1) return candidates[0]!;
-  throw new Error(`Cannot unambiguously locate the active Windows Terminal settings. Pass settingsPath explicitly.${candidates.length ? ` Candidates: ${candidates.join(", ")}` : " No stable, preview, or unpackaged settings file was found."}`);
+  throw new TerminalDetectionError(`Cannot unambiguously locate the active Windows Terminal settings. Pass settingsPath explicitly.${candidates.length ? ` Candidates: ${candidates.join(", ")}` : " No stable, preview, or unpackaged settings file was found."}`);
 }
 
 function detectedProfile(text: string, chain: Ancestor[]): string {
@@ -190,7 +205,22 @@ function detectedProfile(text: string, chain: Ancestor[]): string {
       }
     }
   }
-  throw new Error("WT_PROFILE_ID is missing and the active Windows Terminal profile cannot be proven from process ancestry. Pass profileId explicitly (the profile GUID in Windows Terminal Settings), or launch omp directly in a Windows Terminal tab that supplies WT_PROFILE_ID. defaultProfile is not evidence of the active tab.");
+  throw new TerminalDetectionError("WT_PROFILE_ID is missing and the active Windows Terminal profile cannot be proven from process ancestry. Use /forest profile to choose and remember your profile, or pass --forest-profile explicitly. defaultProfile is not evidence of the active tab.");
+}
+
+export async function listTerminalProfiles(options: { settingsPath?: string } = {}): Promise<TerminalProfile[]> {
+  const path = await realpath(resolve(options.settingsPath ?? await settingsPath(await ancestors())));
+  const tree = settingsTree(await readFile(path, "utf8"));
+  const list = findNodeAtLocation(tree, ["profiles", "list"])!;
+  const profiles: TerminalProfile[] = [];
+  for (const profile of list.children ?? []) {
+    const id = findNodeAtLocation(profile, ["guid"]);
+    if (id?.type !== "string") continue;
+    const name = findNodeAtLocation(profile, ["name"]);
+    profiles.push({ settingsPath: path, profileId: getNodeValue(id), name: name?.type === "string" ? getNodeValue(name) : getNodeValue(id) });
+  }
+  if (!profiles.length) throw new Error("Windows Terminal profiles.list contains no profile GUIDs.");
+  return profiles;
 }
 
 /** Profile-scoped ownership: one controller may manage a given profile at a time. */
@@ -203,19 +233,38 @@ export class TerminalBackground {
   private locked = false;
   private pending: Promise<void> = Promise.resolve();
 
-  private constructor(private readonly path: string, private readonly profileId: string, name: string, private readonly lockPath: string) {
+  private constructor(private readonly path: string, private readonly profileId: string, name: string, private readonly lockPath: string, private bindingPath: string | undefined) {
     this.profileName = name;
   }
 
-  static async create(options: { settingsPath?: string; profileId?: string } = {}): Promise<TerminalBackground> {
+  static async create(options: { settingsPath?: string; profileId?: string; profileBindingPath?: string } = {}): Promise<TerminalBackground> {
     const chain = options.settingsPath && (options.profileId || process.env.WT_PROFILE_ID) ? [] : await ancestors();
-    const path = await realpath(resolve(options.settingsPath ?? await settingsPath(chain)));
-    const text = await readFile(path, "utf8");
-    const profileId = options.profileId ?? detectedProfile(text, chain);
+    let path: string | undefined;
+    let text: string;
+    let profileId: string;
+    try {
+      path = await realpath(resolve(options.settingsPath ?? await settingsPath(chain)));
+      text = await readFile(path, "utf8");
+      profileId = options.profileId ?? detectedProfile(text, chain);
+    } catch (error) {
+      if (options.profileId || process.env.WT_PROFILE_ID || !(error instanceof TerminalDetectionError) || !options.profileBindingPath) throw error;
+      const saved = await loadProfileBinding(options.profileBindingPath);
+      if (!saved) throw error;
+      const savedPath = await realpath(saved.settingsPath);
+      const detectedKey = process.platform === "win32" ? path?.toLowerCase() : path;
+      const savedKey = process.platform === "win32" ? savedPath.toLowerCase() : savedPath;
+      if (detectedKey && detectedKey !== savedKey) {
+        throw new Error("The saved forest profile belongs to a different Windows Terminal settings file. Use /forest profile to bind this terminal; the other file was not changed.");
+      }
+      path = savedPath;
+      text = await readFile(path, "utf8");
+      profileId = saved.profileId;
+    }
+    const selectedPath = path!;
     const doc = document(text, profileId);
     const name = findNodeAtLocation(doc.profile, ["name"]);
-    const key = createHash("sha256").update(`${process.platform === "win32" ? path.toLowerCase() : path}\0${profileId.replace(/^\{|\}$/g, "").toLowerCase()}`).digest("hex").slice(0, 24);
-    const controller = new TerminalBackground(path, profileId, name?.type === "string" ? getNodeValue(name) : profileId, join(dirname(path), "omp-forest-assets", `${key}.lock`));
+    const key = createHash("sha256").update(`${process.platform === "win32" ? selectedPath.toLowerCase() : selectedPath}\0${profileId.replace(/^\{|\}$/g, "").toLowerCase()}`).digest("hex").slice(0, 24);
+    const controller = new TerminalBackground(selectedPath, profileId, name?.type === "string" ? getNodeValue(name) : profileId, join(dirname(selectedPath), "omp-forest-assets", `${key}.lock`), options.profileId ? options.profileBindingPath : undefined);
     await controller.acquire();
     try { checkCustomShader(doc); } catch (error) {
       await controller.release();
@@ -262,6 +311,10 @@ export class TerminalBackground {
       for (const field of FIELDS) changed = setProperty(changed, this.profileId, field, next[field]);
       await this.commit(text, changed);
       this.applied = next;
+      if (this.bindingPath) {
+        await saveProfileBinding(this.bindingPath, { settingsPath: this.path, profileId: this.profileId });
+        this.bindingPath = undefined;
+      }
     });
   }
 

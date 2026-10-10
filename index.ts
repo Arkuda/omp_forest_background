@@ -1,13 +1,18 @@
+import { getAgentDir } from "@oh-my-pi/pi-coding-agent";
+import { join } from "node:path";
+import { rm } from "node:fs/promises";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { createBackground } from "./src/background.ts";
 import type { Background, ForestState } from "./src/background.ts";
 import { DEFAULT_SCENE, isSceneId, sceneIds, scenes } from "./src/scenes.ts";
+import type { ProfileBinding } from "./src/profile.ts";
+import { listTerminalProfiles } from "./src/terminal.ts";
 
 export default function forestPlugin(pi: ExtensionAPI): void {
   pi.setLabel("ascii.rest scenes — animated terminal background");
   pi.registerFlag("forest-profile", {
     type: "string",
-    description: "Windows Terminal profile GUID (normally detected automatically)",
+    description: "Windows Terminal profile GUID (remembered after successful activation)",
   });
   pi.registerFlag("forest-settings", {
     type: "string",
@@ -20,6 +25,8 @@ export default function forestPlugin(pi: ExtensionAPI): void {
   });
 
   let state: ForestState = { enabled: true, animated: true, brightness: 0.16, scene: DEFAULT_SCENE };
+  const profileBindingPath = join(getAgentDir(), "forest-profile.json");
+  let selectedProfile: ProfileBinding | undefined;
   let background: Background | undefined;
   let loading: Promise<Background> | undefined;
   let closing = false;
@@ -42,8 +49,9 @@ export default function forestPlugin(pi: ExtensionAPI): void {
       const profile = pi.getFlag("forest-profile");
       const settings = pi.getFlag("forest-settings");
       loading = createBackground({
-        profileId: typeof profile === "string" ? profile : undefined,
-        settingsPath: typeof settings === "string" ? settings : undefined,
+        profileId: selectedProfile?.profileId ?? (typeof profile === "string" ? profile : undefined),
+        settingsPath: selectedProfile?.settingsPath ?? (typeof settings === "string" ? settings : undefined),
+        profileBindingPath,
         onError: (error) => {
           if (!closing) ctx.ui.notify(`Forest: animation stopped: ${error.message}`, "warning");
         },
@@ -86,7 +94,7 @@ export default function forestPlugin(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("forest", {
-    description: "Terminal scenes: scenes, scene <id>, on, off, still, animate, brightness 1–30 (%)",
+    description: "Terminal scenes: scenes, scene <id>, profile [guid|auto], on, off, still, animate, brightness 1–30 (%)",
     getArgumentCompletions: (prefix) => {
       const value = prefix.toLowerCase();
       if (value.startsWith("scene ")) {
@@ -94,7 +102,7 @@ export default function forestPlugin(pi: ExtensionAPI): void {
         return sceneIds.filter((id) => id.startsWith(fragment))
           .map((id) => ({ value: `scene ${id}`, label: id, description: scenes[id].note }));
       }
-      return ["scenes", "scene", "on", "off", "still", "animate", "brightness"]
+      return ["scenes", "scene", "profile", "profile auto", "on", "off", "still", "animate", "brightness"]
         .filter((command) => command.startsWith(value))
         .map((command) => ({ value: command, label: command }));
     },
@@ -107,6 +115,52 @@ export default function forestPlugin(pi: ExtensionAPI): void {
       const value = args.trim().toLowerCase();
       if (value === "scenes") {
         ctx.ui.notify(sceneIds.map((id) => `${id === state.scene ? "* " : "  "}${id} — ${scenes[id].note}`).join("\n"), "info");
+        return;
+      }
+      if (value === "profile" || value.startsWith("profile ")) {
+        if (process.platform !== "win32") {
+          ctx.ui.notify("Forest profile binding is only needed for Windows Terminal.", "warning");
+          return;
+        }
+        try {
+          const requested = value.slice(7).trim();
+          if (requested === "auto") {
+            await rm(profileBindingPath, { force: true });
+            selectedProfile = undefined;
+            ctx.ui.notify("Forest: saved profile forgotten. The current background is unchanged; the next omp launch will use automatic detection.", "info");
+            return;
+          }
+          if (background && state.enabled) {
+            ctx.ui.notify("Use /forest off before changing the Windows Terminal profile.", "warning");
+            return;
+          }
+          const settings = pi.getFlag("forest-settings");
+          const profiles = await listTerminalProfiles({
+            settingsPath: selectedProfile?.settingsPath ?? (typeof settings === "string" ? settings : undefined),
+          });
+          let chosen: ProfileBinding | undefined;
+          if (requested) {
+            const requestedId = requested.replace(/^\{|\}$/g, "").toLowerCase();
+            chosen = profiles.find((profile) => profile.profileId.replace(/^\{|\}$/g, "").toLowerCase() === requestedId);
+            if (!chosen) throw new Error(`Profile "${requested}" was not found in ${profiles[0]!.settingsPath}.`);
+          } else {
+            const labels = profiles.map((profile) => `${profile.name} (${profile.profileId})`);
+            const label = await ctx.ui.select("Choose the profile of your Windows Terminal tab", labels);
+            if (!label || closing) return;
+            chosen = profiles[labels.indexOf(label)];
+            if (!chosen) throw new Error("The selected Windows Terminal profile is no longer available.");
+          }
+          await background?.restore();
+          background = undefined;
+          selectedProfile = chosen;
+          const terminal = await getBackground(ctx);
+          if (closing) return;
+          await terminal.apply({ ...state, enabled: true });
+          state.enabled = true;
+          ctx.ui.notify(`Forest: ${terminal.profileName} remembered in ${profileBindingPath}. Next time launch plain omp; brightness and animation mode are unchanged.`, "info");
+        } catch (error) {
+          ctx.ui.notify(`Forest: ${error instanceof Error ? error.message : String(error)}`, "error");
+        }
         return;
       }
       const next = { ...state };
@@ -127,7 +181,7 @@ export default function forestPlugin(pi: ExtensionAPI): void {
         next.enabled = true;
         initialized = true;
       } else {
-        ctx.ui.notify("Usage: /forest [scenes|scene <id>|on|off|still|animate|brightness 1–30]", "warning");
+        ctx.ui.notify("Usage: /forest [scenes|scene <id>|profile [guid|auto]|on|off|still|animate|brightness 1–30]", "warning");
         return;
       }
       try {
