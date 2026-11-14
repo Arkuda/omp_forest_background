@@ -4,39 +4,77 @@ import { FRAME_COUNT, SAMPLE_FPS, TILES_PER_ROW, sceneIds, scenes } from "../src
 import type { SceneId } from "../src/scenes.ts";
 import type { Frame } from "../src/vendor/types.ts";
 import alpineDawn from "../src/vendor/alpine-dawn.ts";
+import amerFort from "../src/vendor/amer-fort.ts";
 import auroraFjord from "../src/vendor/aurora-fjord.ts";
+import blackPrism from "../src/vendor/black-prism.ts";
+import cloudSea from "../src/vendor/cloud-sea.ts";
+import commandCity from "../src/vendor/command-city.ts";
 import deepReef from "../src/vendor/deep-reef.ts";
 import desertNight from "../src/vendor/desert-night.ts";
 import earthrise from "../src/vendor/earthrise.ts";
+import edgeOrbit from "../src/vendor/edge-orbit.ts";
+import gangaurGhat from "../src/vendor/gangaur-ghat.ts";
+import greenStorm from "../src/vendor/green-storm.ts";
+import jalMahal from "../src/vendor/jal-mahal.ts";
+import jungleFalls from "../src/vendor/jungle-falls.ts";
+import kiteFestival from "../src/vendor/kite-festival.ts";
 import kyotoDusk from "../src/vendor/kyoto-dusk.ts";
+import lakePichola from "../src/vendor/lake-pichola.ts";
 import lanternLake from "../src/vendor/lantern-lake.ts";
+import lavaWall from "../src/vendor/lava-wall.ts";
 import marineDrive from "../src/vendor/marine-drive.ts";
 import mistyForest from "../src/vendor/misty-forest.ts";
 import nightCoast from "../src/vendor/night-coast.ts";
+import nightHighway from "../src/vendor/night-highway.ts";
 import oceanSunset from "../src/vendor/ocean-sunset.ts";
+import planetScale from "../src/vendor/planet-scale.ts";
+import prismCity from "../src/vendor/prism-city.ts";
+import saltFlat from "../src/vendor/salt-flat.ts";
+import saturnRise from "../src/vendor/saturn-rise.ts";
+import snowTrain from "../src/vendor/snow-train.ts";
 import stormPlains from "../src/vendor/storm-plains.ts";
 import tajDawn from "../src/vendor/taj-dawn.ts";
 import tokyoRain from "../src/vendor/tokyo-rain.ts";
 import varanasiGhats from "../src/vendor/varanasi-ghats.ts";
+import volcanoNight from "../src/vendor/volcano-night.ts";
 
 // Original factories are build-only. Preserve their ordered palette lookup:
 // rendering a later sample without all earlier samples can change its colors.
 const factories: Record<SceneId, () => Frame> = {
   "alpine-dawn": alpineDawn,
+  "amer-fort": amerFort,
   "aurora-fjord": auroraFjord,
+  "black-prism": blackPrism,
+  "cloud-sea": cloudSea,
+  "command-city": commandCity,
   "deep-reef": deepReef,
   "desert-night": desertNight,
   earthrise,
+  "edge-orbit": edgeOrbit,
+  "gangaur-ghat": gangaurGhat,
+  "green-storm": greenStorm,
+  "jal-mahal": jalMahal,
+  "jungle-falls": jungleFalls,
+  "kite-festival": kiteFestival,
   "kyoto-dusk": kyotoDusk,
+  "lake-pichola": lakePichola,
   "lantern-lake": lanternLake,
+  "lava-wall": lavaWall,
   "marine-drive": marineDrive,
   "misty-forest": mistyForest,
   "night-coast": nightCoast,
+  "night-highway": nightHighway,
   "ocean-sunset": oceanSunset,
+  "planet-scale": planetScale,
+  "prism-city": prismCity,
+  "salt-flat": saltFlat,
+  "saturn-rise": saturnRise,
+  "snow-train": snowTrain,
   "storm-plains": stormPlains,
   "taj-dawn": tajDawn,
   "tokyo-rain": tokyoRain,
   "varanasi-ghats": varanasiGhats,
+  "volcano-night": volcanoNight,
 };
 const DOTS = " ·•●";
 const assetsDirectory = new URL("../assets/", import.meta.url);
